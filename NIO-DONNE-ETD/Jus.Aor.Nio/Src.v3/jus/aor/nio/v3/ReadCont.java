@@ -14,6 +14,7 @@ public class ReadCont  extends Continuation{
 	private ByteBuffer buffTaille = ByteBuffer.allocate(4);
 	private int nbByteToRead = 0;
 	private ByteBuffer inBuffer;
+	private int nbStep = 0;
 	// to complete
 
 	/**
@@ -30,7 +31,7 @@ public class ReadCont  extends Continuation{
 	 */
 	protected Message handleRead() throws IOException, ClassNotFoundException{
 		int nbread = 0;
-		Message message;
+		nbStep ++;
 		switch(state){
 			case READING_DATA :
 				nbread = socketChannel.read(inBuffer);	
@@ -41,7 +42,10 @@ public class ReadCont  extends Continuation{
 					this.state = State.READING_LENGTH;
 					nbByteToRead = 0;
 					buffTaille.clear();
-					message = new Message(inBuffer.array());
+					Message m = new Message(inBuffer.array(), nbStep);
+					nbStep =0;
+					return m;
+					
 				}
 				break;
 			case READING_LENGTH :

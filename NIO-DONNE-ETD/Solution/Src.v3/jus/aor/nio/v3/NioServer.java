@@ -13,56 +13,43 @@ import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+
 /**
- * NIO client with continuation management
+ * NIO server with continuation management
  * RICM4 TP
  * F. Boyer
  */
-public class NioClient implements Runnable{
-	// The channel used to communicate with the server
-	private SocketChannel clientChannel;
+
+public class NioServer implements Runnable{
+	// The channel used to accept connections from server-side
+	private ServerSocketChannel serverChannel;
 	// Unblocking selector
 	private Selector selector;
-	// address server
-	private InetAddress serverAddress;
-	// The client only needs one read (resp. write) continuation 
-	ReadCont readCont;
-	WriteCont writeCont;
-	// The message to send to the server
-	Message msg;
-	// The client Id
-	private int clientId;
-	// the logger used
+	// Ip address of the server
+	private InetAddress hostAddress;
+	// Continuations for reading messages
+	private Map<SocketChannel,ReadCont> readConts = new HashMap<SocketChannel, ReadCont>();
+	// Continuations for writing messages
+	private Map<SocketChannel,WriteCont> writeConts = new HashMap<SocketChannel, WriteCont>();
 	private Logger log;
-	// the number of itérations to be done by the client
-	private int nbIterations;
 	/**
 	 * NIO engine initialization for server side
-	 * @param serverAddressName the server address name
-	 * @param port the server port
-	 * @param id the client id
-	 * @param nbIterations 
+	 * @param port the host address and port of the server
 	 * @throws IOException 
 	 */
-	public NioClient(String serverAddressName, int port, int id, int nbIterations) throws IOException{
-		this.msg = new Message(id);
-		this.clientId = id;
-		this.nbIterations=nbIterations;
-
-		serverAddress = InetAddress.getByName(serverAddressName);
+	public NioServer(int port) throws IOException{
 		// create a new selector
 		selector = SelectorProvider.provider().openSelector();
 		// create a new non-blocking server socket channel
-		clientChannel = SocketChannel.open();
-		clientChannel.configureBlocking(false);
+		serverChannel = ServerSocketChannel.open();
+		serverChannel.configureBlocking(false);
+		// bind the server socket to the given address and port
+		hostAddress = InetAddress.getByName("localhost");
+		InetSocketAddress isa = new InetSocketAddress(hostAddress, port);
+		serverChannel.socket().bind(isa);
 		// be notified when connection requests arrive
-		clientChannel.register(selector, SelectionKey.OP_CONNECT);
-		// les automates 
-		readCont = new ReadCont(clientChannel);
-		writeCont = new WriteCont(clientChannel.keyFor(this.selector), clientChannel);
-		// connection to the server
-		clientChannel.connect(new InetSocketAddress(serverAddress, port));
-		log = Logger.getLogger("jus/aor/nio/v3/NioClient."+clientId);
+		serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+		log= Logger.getLogger("jus/aor/nio/v3/NioServer."+port);
 	}
 	/**
 	 * NIO engine mainloop
@@ -71,21 +58,20 @@ public class NioClient implements Runnable{
 	 * Selected events for a given channel may change over time
 	 */
 	public void run(){
-		log.log(Level.FINE,"NioClient running");
-		// control the exexution of the client
-		for(int iteration=0; iteration<nbIterations;iteration++){
+		log.log(Level.FINE,"NioServer running");
+		while(true){
 			try{
 				selector.select();
 				Iterator<?> selectedKeys = this.selector.selectedKeys().iterator();
 				while(selectedKeys.hasNext()){
 					SelectionKey key = (SelectionKey) selectedKeys.next();
 					selectedKeys.remove();
-					if			 (!key.isValid()){			continue;		
-					}else if (key.isAcceptable()){	handleAccept(key);
-					}else if (key.isReadable()){		handleRead(key);
-					}else if (key.isWritable()){		handleWrite(key);
-					}else if (key.isConnectable()){ handleConnect(key);
-					}else 													System.err.println("  ---> unknown key=");
+					if			(!key.isValid()){ 			continue;
+					}else if(key.isAcceptable()){		handleAccept(key);
+					}else if(key.isReadable()){ 		handleRead(key);
+					}else if(key.isWritable()){ 		handleWrite(key);
+					}else if(key.isConnectable()){	handleConnect(key);
+					}else 													System.err.println("  ---> unknow key=");
 				}
 			}catch(Exception e){
 				e.printStackTrace(System.err);
@@ -112,13 +98,16 @@ public class NioClient implements Runnable{
 		}catch(ClosedChannelException e){
 			handleClose(socketChannel);
 		}
+		// create continuations for the socketChannel
+		SelectionKey k = socketChannel.keyFor(this.selector);
+		readConts.put(socketChannel, new ReadCont(socketChannel));
+		writeConts.put(socketChannel, new WriteCont(k, socketChannel));
 	}
 	/**
 	 * Finish to establish a connection
 	 * @param key the key of the channel on which a connection is requested
-	 * @throws IOException 
 	 */
-	private void handleConnect(SelectionKey key) throws IOException{
+	private void handleConnect(SelectionKey key){
 		SocketChannel socketChannel = (SocketChannel) key.channel();
 		try{
 			socketChannel.finishConnect();
@@ -127,24 +116,20 @@ public class NioClient implements Runnable{
 			System.err.println(e);
 			key.cancel();
 			return;
-		}	
-		// set up READ interest during all execution time
+		}
 		key.interestOps(SelectionKey.OP_READ);	
-		// when connected, send a message to the server 
-		Message msg= new Message(clientId);
-		send(msg);
 	}
 	/**
 	 * Close a channel 
 	 * @param socketChannel the channel to close
 	 */
 	private void handleClose(SocketChannel socketChannel){
-		socketChannel.keyFor(selector).cancel();
 		try{
 			socketChannel.close();
 		}catch(IOException e){
-			//nothing to do, the channel is already closed
+			// nothing to do, the channel is already closed
 		}
+		socketChannel.keyFor(selector).cancel();
 	}
 	/**
 	 * Handle incoming data event
@@ -152,16 +137,16 @@ public class NioClient implements Runnable{
 	 * @throws ClassNotFoundException 
 	 */
 	private void handleRead(SelectionKey key) throws ClassNotFoundException{
+		SocketChannel socketChannel = (SocketChannel) key.channel();
 		try{
-			Message msg = readCont.handleRead();
+			Message msg = readConts.get(socketChannel).handleRead();
 			if (msg != null){
-				log.log(Level.FINE,String.format("Full Message Received : %s",msg));
-				msg.incrementExchange();
-				send(msg);
+				log.log(Level.FINE,"Full Message Received:" + msg);
+				send(socketChannel, msg); 
 			}					
-		}catch (IOException e){
+		}catch(IOException e){
 			// The channel has been closed abruptly
-			handleClose((SocketChannel) key.channel());
+			handleClose(socketChannel);
 		}
 	}
 	/**
@@ -169,19 +154,23 @@ public class NioClient implements Runnable{
 	 * @param key the key of the channel on which data can be sent 
 	 */
 	private void handleWrite(SelectionKey key){
+		SocketChannel socketChannel = (SocketChannel) key.channel();
 		try{
-			writeCont.handleWrite();
-		} catch (IOException e) {
-			handleClose((SocketChannel) key.channel());
+			writeConts.get(socketChannel).handleWrite();
+		}catch(IOException e){
+			// The channel has been closed abruptly
+			handleClose(socketChannel);
 		}
 	}
 	/**
-	 * Send message
-	 * @param msg the message that should be sent
+	 * Send data
+	 * @param socketChannel the channel on which data that should be sent
+	 * @param data the data that should be sent
 	 * @throws IOException 
 	 */
-	public void send(Message msg) throws IOException{
+	public void send(SocketChannel socketChannel, Message data) throws IOException{
 		// enqueue the data we want to send
-		writeCont.sendMsg(msg);
+		WriteCont writeCont = writeConts.get(socketChannel);
+		writeCont.sendMsg(data);
 	}
 }
